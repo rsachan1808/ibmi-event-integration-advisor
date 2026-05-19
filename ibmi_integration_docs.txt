@@ -1,0 +1,649 @@
+## 3.1 The Translation Boundary Principle
+
+### What it is
+
+The translation boundary is the point in the integration 
+architecture where data crosses from one domain to another. 
+In an IBMi + Kafka integration, there are two distinct domains:
+
+- The integration layer — entry point program, logging program, 
+  routing logic. This layer is producer-agnostic and 
+  application-agnostic. Its job is to receive, log, and route.
+
+- The application layer — the chain of RPG programs that 
+  implement business logic for a specific use case. This layer 
+  owns data interpretation and processing.
+
+The translation boundary sits between these two layers. JSON 
+parsing — the act of interpreting payload content and converting 
+it to RPG data types — belongs on the application side of that 
+boundary, not the integration side.
+
+---
+
+### Why parsing belongs in the application layer
+
+The integration layer is shared infrastructure. It serves 
+multiple producers and multiple application chains. If JSON 
+parsing happened at the entry point, the entry point would 
+need to understand every possible payload structure from every 
+possible producer. Every time a new producer was onboarded or 
+an existing payload structure changed, the entry point would 
+need to change alongside it.
+
+By keeping the entry point payload-agnostic — accepting the 
+JSON string as a single opaque parameter and passing it 
+unchanged — the integration layer remains stable regardless 
+of how many applications it serves or how their payloads evolve.
+
+---
+
+### The parameter passing tradeoff
+
+Parsing at the entry point would require building a large data 
+structure or parameter list to hold all extracted attributes, 
+then passing that structure through every program in the chain. 
+This creates several problems:
+
+- Every program in the chain receives all fields even if it 
+  only needs a few
+- Adding a new field to the payload requires updating the 
+  shared data structure and every program that uses it
+- The data structure becomes a coupling point between the 
+  integration layer and every application it serves
+
+Passing the raw JSON string as a single parameter avoids all 
+of these problems. Each application program extracts only the 
+fields it needs, when it needs them. The integration layer 
+passes one parameter regardless of payload complexity.
+
+---
+
+### Data integrity benefit
+
+Parsing close to where data is required also preserves data 
+integrity. When a program extracts a field and immediately 
+uses it, the extracted value has not travelled through 
+intermediate programs or been stored in a shared structure 
+where it could be overwritten or misread.
+
+The JSON string is the single source of truth as it travels 
+through the chain. Each program reads directly from that 
+source rather than from a pre-parsed intermediate 
+representation.
+
+---
+
+### The principle stated simply
+
+Parse data as close to where it is needed as possible.
+Keep shared infrastructure ignorant of payload content.
+Pass one parameter through the chain — the raw payload —
+rather than many parameters representing parsed fields.
+
+This keeps the integration layer stable, reduces coupling 
+between layers, and limits the impact of payload structure 
+changes to the programs that actually use the changed fields.
+
+## 3.2 Entry Point Program Structure
+
+### Design decision — standalone program not a service program
+
+The entry point is implemented as a standalone RPG program rather 
+than a service program procedure. The reasoning is straightforward: 
+the entry point has a single, fixed purpose — to receive an RPC 
+call from an external system and start the IBMi processing chain. 
+It is not shared logic that multiple callers need to bind to. A 
+standalone program is the correct choice when the entry point is 
+a fixed, externally-facing boundary rather than reusable internal 
+logic.
+
+Service programs are appropriate for shared business logic called 
+by multiple internal programs. Entry points facing external systems 
+are better implemented as standalone programs — the boundary is 
+explicit and the calling convention is simpler for the connector 
+to invoke.
+
+---
+
+### Parameters accepted
+
+The entry point accepts two categories of parameters:
+
+**Routing parameters** — a small number of fixed parameters 
+passed first. These identify which external system (producer) 
+sent the message. They are used downstream to determine which 
+chain of application programs to invoke. They are not parsed 
+or processed by the entry point itself.
+
+**JSON payload parameter** — the full JSON string passed as a 
+single character parameter. The entry point does not parse this 
+payload. It passes it unchanged to the downstream programs that 
+need it.
+
+This is a deliberate design decision. The entry point does not 
+need to understand the payload content — it only needs to route 
+it correctly. Keeping the entry point payload-agnostic means it 
+does not need to change when the JSON structure changes.
+
+---
+
+### What the entry point does — step by step
+
+Step 1 — Receive RPC call from Infoview sink connector
+Parameters: routing fields + JSON payload string
+Step 2 — Call logging program
+Pass all received parameters
+Logging program records what IBMi received
+Provides audit trail and debugging baseline
+Step 3 — Logging program reads routing table
+Uses routing parameters to look up static IBMi table
+Table defines which application program chain to invoke
+for each producer
+Step 4 — Logging program calls first program in the chain
+Passes routing parameters + JSON payload string
+Control transfers to application processing chain
+Step 5 — Application programs own JSON parsing
+Each program in the chain extracts only the fields
+it needs from the JSON payload
+Type conversion happens here — not in the entry point
+Step 6 — Last program in chain builds response JSON
+Constructs response including status and error structure
+Writes response JSON string to data queue
+Infoview source connector picks up from data queue
+
+---
+
+### The routing table pattern
+
+The use of a static IBMi table to drive program chain selection 
+is a significant design decision worth understanding. Rather than 
+hardcoding which programs to call for which producer inside the 
+entry point or logging program, the routing is data-driven.
+
+This means adding a new producer integration does not require 
+code changes — only a new row in the routing table. The entry 
+point and logging program remain unchanged regardless of how 
+many producers are onboarded.
+
+This pattern directly addresses the scaling lesson documented 
+in section 3.5 — designing for multiple system integrations 
+from the start rather than hardcoding for one.
+
+---
+
+### The logging program as the decision point
+
+Note that the entry point itself makes no routing decisions. 
+It delegates immediately to a logging program which owns both 
+the audit logging and the routing logic. This separation has 
+two benefits:
+
+First, every inbound message is logged before any processing 
+begins — providing a complete audit trail regardless of what 
+happens downstream.
+
+Second, if routing fails or the application chain abends, the 
+log record already exists. Debugging starts from a known 
+baseline rather than trying to reconstruct what was received.
+
+---
+
+### Where JSON parsing does NOT happen
+
+A common assumption is that the entry point or a central parsing 
+program would extract all JSON fields once and pass structured 
+data to downstream programs. This architecture takes a different 
+approach — JSON parsing happens inside each application program 
+that needs specific fields.
+
+The tradeoff is intentional:
+
+- Application programs only parse what they need
+- The entry point and logging program stay simple and stable
+- Changes to the JSON structure affect only the programs that 
+  use the changed fields
+- The JSON string travels through the chain unchanged until 
+  it reaches a program that needs to read it
+
+The type conversion patterns documented in section 3.4 apply 
+inside each application program where parsing occurs.
+
+---
+
+### Security — where user profile validation happens
+
+User profile validation and role-based access control happen 
+at the Infoview connector layer, before the RPC call reaches 
+the IBMi entry point program. The entry point itself performs 
+no authentication checks. If the connector call reaches the 
+entry point, it has already been authorised.
+
+This means security configuration is an Infoview and IBMi 
+user profile concern, not an application code concern. See 
+section 3.5 Mistake 1 for the lesson learned about validating 
+this setup early.
+
+## 3.3 JSON Parsing on IBMi Using YAJL
+
+### Six-step parsing process overview
+
+The YAJL parsing process on IBMi follows six steps in sequence:
+1. Sanitise the incoming JSON string — replace invalid IBMi characters with blanks
+2. Convert JSON string to tree-node structure using YAJL services
+3. Navigate to key nodes using relative path from the root
+4. Iterate child nodes using DoWhile loop with GetFirstChild and GetNextChild
+5. Handle simple vs complex attributes using If-ElseIf logic
+6. Handle arrays and nested objects using nested DoWhile loops
+
+Each step is described in detail below.
+
+### Library and environment
+
+JSON parsing on IBMi is implemented using YAJL (Yet Another 
+JSON Library) services, available on IBMi 7.4 and above. 
+This implementation was developed on IBMi 7.5 (V7R5M0).
+
+YAJL converts a JSON string into a tree-node structure in 
+memory. Once parsed, the tree is navigated using relative 
+paths and child node iteration rather than string manipulation 
+or direct key lookup. This is fundamentally different from 
+JSON parsing in Python or JavaScript — there is no dictionary 
+access by key name directly. Navigation is explicit and 
+positional.
+
+---
+### Context — YAJL parsing as established IBMi practice
+
+Tree-node JSON parsing using YAJL services is not specific to 
+event-driven integrations. This approach has been used in IBMi 
+environments for synchronous API integrations — such as 
+front-end application APIs — for many years as part of 
+modernisation efforts to connect IBMi systems with web-facing 
+applications.
+
+The event-driven integration pattern adopted the same YAJL 
+parsing approach that was already proven in synchronous 
+contexts. This means:
+
+- The parsing logic is mature and battle-tested, not 
+  experimental
+- IBMi development teams familiar with synchronous API 
+  integration will find the parsing approach identical
+- The main difference is architectural — asynchronous 
+  event consumption via Kafka connector rather than 
+  synchronous HTTP request handling
+
+If your IBMi team already uses YAJL for API integrations, 
+the JSON parsing knowledge required for Kafka integration 
+is already present. The learning curve is in the event-driven 
+architecture patterns, not in the IBMi parsing mechanics.
+
+### Step 1 — Sanitise the incoming JSON string
+
+Before parsing, the JSON payload is sanitised. Any characters 
+outside the allowed IBMi character set are replaced with blanks. 
+This step is necessary because JSON payloads originating from 
+GCP applications may contain characters that IBMi does not 
+handle correctly in character fields.
+
+This sanitisation step must happen before YAJL parsing — 
+passing an unsanitised string to YAJL can cause unexpected 
+parsing failures that are difficult to trace back to character 
+encoding as the root cause.
+
+---
+
+### Step 2 — Convert JSON string to tree-node structure
+
+YAJL services are called to parse the sanitised JSON string 
+into a tree-node structure in memory. This tree represents 
+the complete JSON hierarchy. The root node is the entry point 
+for all subsequent navigation.
+
+After this step, the original JSON string is no longer 
+referenced. All subsequent work is done against the tree 
+structure.
+
+---
+
+### Step 3 — Navigate to key nodes using relative path
+
+Key nodes are extracted from the tree using relative paths 
+from the root. A relative path identifies a node by its 
+position in the hierarchy.
+
+For example, given this JSON structure:
+
+```json
+{
+  "customer": {
+    "id": "12345",
+    "name": "Smith"
+  }
+}
+```
+
+The customer node is extracted first using its relative path 
+from the root. Once the customer node is obtained, it becomes 
+the starting point for extracting its child nodes — id and 
+name — through iteration.
+
+You do not jump directly to a deeply nested field in one step. 
+Navigation is top-down — parent node first, then children.
+
+---
+
+### Step 4 — Iterate child nodes using DoWhile loop
+
+Child nodes are extracted using a DoWhile loop with two 
+YAJL service calls:
+
+- GetFirstChild — retrieves the first child node of a 
+  parent node
+- GetNextChild — retrieves the next sibling node
+
+At the start of each loop iteration, the current child node 
+is checked for null. A null child node signals that all 
+children have been processed — this is the loop exit 
+condition. There is no explicit count of children. The null 
+check is the only termination signal.
+
+GetFirstChild from parent node → current child node
+DoWhile current child node is not null
+process current child node
+GetNextChild → current child node
+EndDo
+
+---
+
+### Step 5 — Handle simple vs complex attributes
+
+Within the DoWhile loop, each child node is evaluated using 
+If-ElseIf logic (or equivalent Select-When-EndSl) to 
+identify which attribute is being processed:
+
+**Simple attributes** — a single value field such as a 
+string, number, date, or boolean. When identified:
+  1. Extract the value from the node
+  2. Apply field validation (null check, length, format)
+  3. Convert to the appropriate RPG data type 
+     (see section 3.4 type conversion reference)
+  4. Move the converted value to the corresponding field 
+     in the designated file
+
+**Complex attributes** — a node that contains child nodes 
+of its own, equivalent to a nested JSON object. When 
+identified:
+  1. Treat the node as a new parent
+  2. Execute another DoWhile loop to iterate its children
+  3. Apply the same simple vs complex evaluation to each 
+     child node
+  4. Repeat until all nested levels are exhausted
+
+Optional attributes — fields that may or may not be present 
+in the payload — are handled naturally by the If-ElseIf 
+structure. If a node matching the expected attribute name 
+is not found in the current iteration, the ElseIf condition 
+is simply not met and processing moves to the next node. 
+No explicit missing-field handling is required beyond 
+ensuring the corresponding RPG field retains its default 
+value.
+
+---
+
+### Step 6 — Arrays and nested objects
+
+Arrays in JSON appear as a node containing multiple child 
+nodes of the same type. The loop structure is identical to 
+nested object handling — an outer loop and an inner loop:
+
+**Outer loop** — iterates over each element in the array 
+using GetFirstChild / GetNextChild. Each iteration 
+represents one array element.
+
+**Inner loop** — for each array element, iterates over 
+its child attributes using the same GetFirstChild / 
+GetNextChild pattern. Each inner iteration processes 
+one attribute of the current array element.
+
+The termination condition for both loops is the same — 
+null child node signals end of iteration. The nesting 
+depth of loops matches the nesting depth of the JSON 
+structure.
+
+On the IBMi side, the equivalent data structure is defined 
+to match the array. Each iteration of the outer loop 
+populates one occurrence of that data structure.
+
+---
+
+### Complete parsing flow summary
+Receive JSON string parameter
+↓
+Sanitise — replace invalid IBMi characters with blanks
+↓
+YAJL parse — convert string to tree-node structure
+↓
+Extract key parent node using relative path
+↓
+DoWhile — GetFirstChild / GetNextChild until null
+↓
+If-ElseIf — identify current attribute
+↓ simple     → validate → convert → move to field
+↓ complex    → nested DoWhile for child attributes
+↓ array      → outer DoWhile (elements)
+inner DoWhile (attributes per element)
+↓ optional   → not matched → skip, retain default
+↓
+End of loop — null child node reached
+↓
+Processing complete for this node level
+---
+
+### Key things to know before writing YAJL parsing code
+
+- Navigation is always top-down — you cannot jump to a 
+  deeply nested field without first obtaining its parent node
+- The null check is the only loop termination signal — 
+  there is no length or count available
+- Sanitise before parsing — character encoding issues 
+  cause YAJL failures that are hard to diagnose
+- Optional fields require no special handling in the loop 
+  structure — the If-ElseIf simply does not match and 
+  processing continues
+- The loop structure depth mirrors the JSON nesting depth — 
+  three levels of nesting requires three levels of loops
+
+## 3.4 Type Conversion Reference 
+### Important — all JSON values arrive as strings on the IBMi side
+
+When the Infoview connector passes the JSON payload to the IBMi 
+entry point program, all values — including numbers, integers, 
+booleans, and dates — are received as character strings by the 
+RPG tree-node parser. There is no automatic type inference. 
+Every conversion from JSON type to RPG type is explicit and 
+must be handled in code.
+
+This is the single most important thing to understand before 
+writing the entry point program. Assuming a JSON number will 
+arrive as a numeric value on the IBMi side is the most common 
+source of runtime errors in this integration pattern.
+
+### Null handling — the most common source of silent failures
+
+Null values require explicit checks before any conversion attempt.
+The pattern to apply consistently:
+
+  IF JSON attribute IS NOT NULL;
+    perform conversion (%DEC, %DATE, etc.)
+    store into RPG field
+  ELSE;
+    apply default value or log the missing field
+  ENDIF;
+
+Skipping this check for Number and Date fields causes runtime 
+abends that can be difficult to trace back to the JSON payload. 
+Always validate null before converting.
+
+| JSON Type     | RPG Field Type      | Conversion Notes                                                                                                                                                                                                                    |
+|---------------|---------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| String        | CHAR / VARCHAR      | Direct string-to-string mapping — no special handling required. Key constraint is RPG field size — incoming data is silently truncated to match the defined field length. CHAR (fixed length) preferred for transactional data such as client number, name, and address. |
+| Number        | PACKED / ZONED      | JSON numbers arrive as strings — requires explicit string-to-number conversion using %DEC. If the JSON attribute is null, %DEC conversion fails — error handling required before attempting conversion. Validate for null before calling %DEC. |
+| Integer       | INT / PACKED(n:0)   | Same pattern as Number — JSON integers also arrive as strings. Use %DEC for conversion. Null values cause conversion failure — same error handling approach applies. Use PACKED(n:0) for zero decimal places or RPG INT type depending on field requirements. |
+| Boolean       | INDICATOR / CHAR(1) | Booleans arrive as pre-converted string values Y or N from the GCP application. Store directly into INDICATOR variables as 1 or 0. No conversion function needed — direct assignment from the Y/N string value.                     |
+| Date string   | DATE                | String-to-date conversion using %DATE function. Blank or null date strings cause %DATE conversion failure — error handling required before attempting conversion. Validate for blank/null before calling %DATE.                       |
+| Null          | Blank               | Null values on the JSON side are treated as blank on the RPG side. No special conversion — null maps to the RPG field's default blank/zero state. Exception: null inside a Number or Date field requires explicit error handling before any conversion attempt is made. |
+| Nested object | —                   | Handled with nested loops. Outer loop iterates over each object in the main array. Inner loop iterates over the attributes within each object. Extracted attributes are then converted and stored using the type rules above.         |
+| Array         | Data structure      | Define an equivalent data structure on IBMi for the array. Iterate over the JSON array extracting each element and storing into the corresponding RPG data structure fields.                                                         |
+
+
+## 3.5 DOCUMENTED COMMON MISTAKES (5 mistakes total)
+
+The five documented mistakes from this production implementation are:
+1. Underestimating security and connectivity setup
+2. Silent success masking missing configuration  
+3. Assuming null handling is agreed once and stays agreed
+4. Connector parameter extraction more complex than initially prototyped
+5. Scaling not considered early enough in the design
+
+Each mistake is described in detail below.
+
+---
+
+### Documented Mistake 1 — Underestimating the security and connectivity setup
+
+**What happened:**
+The IBMi entry point program is invoked via RPC by the Infoview 
+sink connector. This means the connector authenticates to IBMi 
+using a specific user profile. If that user profile does not have 
+the correct object authority to call the entry point program — or 
+if the Infoview connector parameters are not configured correctly 
+for the IBMi environment — the integration fails before a single 
+line of RPG code executes.
+
+This setup step is easy to underestimate because it sits outside 
+the application code. Developers focus on writing the RPG program 
+and assume connectivity will be handled separately. In practice, 
+authority and connector configuration must be validated as part of 
+the integration design, not treated as an afterthought.
+
+**Lesson:**
+Define the IBMi user profile requirements and Infoview connector 
+parameters as early as the initial design phase. Validate 
+connectivity with a minimal test program before writing any 
+business logic. A failed RPC call due to authority issues produces 
+errors that look like infrastructure failures and are harder to 
+diagnose than application errors.
+
+---
+
+### Documented Mistake 2 — Silent success masking missing configuration
+
+**What happened:**
+After deployment, no failures were appearing in monitoring. The 
+integration layer was processing events without errors. However, 
+the consuming application was not receiving any responses. Post 
+analysis revealed that the integration layer configuration had 
+been promoted correctly but the application layer configuration 
+had not been promoted alongside it.
+
+The system appeared healthy because each individual component was 
+working — events were being consumed, IBMi programs were executing, 
+results were being written to the data queue. The failure was in 
+the end-to-end flow, which no single component could detect on 
+its own.
+
+**Lesson:**
+End-to-end smoke testing after every deployment is non-negotiable 
+in event-driven architectures. Do not rely on the absence of errors 
+as confirmation that the integration is working. Define a specific 
+test event that exercises the full round trip — from producer 
+through to consumer response — and verify the expected outcome 
+explicitly. Configuration across all layers must be promoted and 
+validated together, not independently.
+
+---
+
+### Documented Mistake 3 — Assuming null handling is agreed once and stays agreed
+
+**What happened:**
+An early agreement was reached with the publishing application 
+that null attributes would be omitted from the JSON payload 
+entirely rather than sent as null values. This avoided the need 
+for explicit null handling in the IBMi parsing code at that stage. 
+Schema validation was not enabled at the time.
+
+The risk in this approach is dependency on a convention rather 
+than a contract. Without schema validation enforcing the agreed 
+structure, a change on the publishing side — intentional or 
+accidental — could send null values that the IBMi parsing code 
+was not written to handle, causing silent data corruption or 
+runtime failures.
+
+**Lesson:**
+Enable schema validation in Confluent Schema Registry as early 
+as possible. Schema validation converts an informal agreement 
+into an enforced contract. Any payload that violates the agreed 
+structure is rejected at the Confluent layer before it reaches 
+the IBMi connector — preventing downstream failures that are 
+harder to diagnose. Agreeing on null handling conventions is 
+necessary but not sufficient — the convention must be enforced 
+technically.
+
+---
+
+### Documented Mistake 4 — Connector parameter extraction more complex than initially prototyped
+
+**What happened:**
+A proof of concept demonstrated that extracting parameter values 
+from the Infoview connector was straightforward. During actual 
+implementation, the extraction required additional configuration 
+and handling that was not apparent from the POC.
+
+This is a common pattern in integration projects — POC conditions 
+are simpler than production conditions. POC payloads are small, 
+well-formed, and controlled. Production payloads are larger, more 
+varied, and come from systems the IBMi team does not control.
+
+**Lesson:**
+POC findings for connector behaviour should be treated as a 
+starting point, not a specification. Allow additional time for 
+connector configuration during implementation. Involve the team 
+members who will own the connector configuration from the POC 
+phase rather than bringing them in during implementation — 
+knowledge transfer gaps between POC and implementation are where 
+unexpected complexity most often surfaces.
+
+---
+
+### Documented Mistake 5 — Scaling not considered early enough in the design
+
+**What happened:**
+The initial integration design was validated for a single system 
+integration. As the number of integrated systems grew, architects 
+identified scaling issues that required redesign work.
+
+Event-driven architectures can appear to scale effortlessly in 
+small configurations. The constraints surface when the number of 
+topics, connectors, and IBMi programs grows — particularly around 
+topic naming conventions, connector instance management, IBMi job 
+queue capacity, and data queue polling under high message volumes.
+
+**Lesson:**
+Design for multiple system integrations from the start, even if 
+only one system is in scope initially. Define naming conventions, 
+topic structures, and IBMi job queue configurations that will 
+accommodate growth without architectural changes. The cost of 
+building scalability in from the beginning is far lower than the 
+cost of redesigning a live production integration.
+
+---
+
+### A note on this list
+
+These mistakes are drawn from one production implementation. 
+Different environments, connector versions, and team structures 
+will produce different failure modes. Treat this section as a 
+starting point for your own lessons-learned process rather than 
+a comprehensive catalogue.
