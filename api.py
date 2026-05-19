@@ -21,9 +21,9 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    logger.info("Starting IBMi RAG Agent API...")
+    logger.info("tarting IBMi Event Integration Advisor API...")
     try:
-        from langgraph_agent import ask_agent
+        from integration_advisor_agent import ask_agent
         app.state.ask_agent = ask_agent
         logger.info("Agent loaded successfully")
     except Exception as e:
@@ -33,12 +33,12 @@ async def lifespan(app: FastAPI):
     yield   # server runs here
 
     # Shutdown
-    logger.info("Shutting down IBMi RAG Agent API")
+    logger.info("Shutting down IBMi Event Integration Advisor API")
 
 # ── Create FastAPI app ────────────────────────────────────
 app = FastAPI(
-    title="IBMi RPG Function Finder",
-    description="AI agent that answers questions about IBMi RPG built-in functions",
+        title="IBMi Event Integration Advisor",
+    description="AI agent that helps RPG developers design integrations between IBMi systems and modern event-driven architectures using Kafka and Confluent",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -50,7 +50,7 @@ class QuestionRequest(BaseModel):
     class Config:
         json_schema_extra = {
             "example": {
-                "question": "What does %DATE do in IBMi RPG?"
+                "question": "What is the translation boundary principle in IBMi integration?"
             }
         }
 
@@ -79,8 +79,9 @@ def health_check():
 @app.post("/ask", response_model=AnswerResponse)
 def ask_question(request: QuestionRequest):
     """
-    Ask a question about IBMi RPG built-in functions.
-    Returns a detailed answer based on the documentation.
+    Ask a question about IBMi integration patterns, JSON parsing,
+    entry point design, or event-driven architecture guidance.
+    Returns a detailed answer based on the integration documentation.
     """
     if not request.question or not request.question.strip():
         raise HTTPException(

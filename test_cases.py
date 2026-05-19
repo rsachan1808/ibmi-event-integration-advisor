@@ -1,60 +1,43 @@
 TEST_CASES = [
     {
-        "question": "What does %DATE do in IBMi RPG?",
-        "must_contain": [
-            "%DATE",
-            "date"
-        ],
-        "must_not_contain": [
-            "%TIME",
-            "%TIMESTAMP"
-        ],
-        "ideal_answer": (
-            "%DATE returns the current system date or converts a value "
-            "to date format. When called without parameters it returns "
-            "today's date."
-        )
-    },
-    {
-        "question": "What does %PARMS do in IBMi RPG?",
-        "must_contain": [
-            "%PARMS",
-            "number of parameters",
-            "procedure"
-        ],
-        "must_not_contain": [
-            "%DATE",
-            "%LEN"
-        ],
-        "ideal_answer": (
-            "%PARMS returns the number of parameters passed to the "
-            "current procedure. Used to check if optional parameters "
-            "were provided."
-        )
-    },
-    {
-        "question": "What does %LEN do in IBMi RPG?",
-        "must_contain": [
-            "%LEN",
-            "length",
-        ],
-        "must_not_contain": [
-            "%DATE",
-            "%PARMS"
-        ],
-        "ideal_answer": (
-            "%LEN returns the declared length of a field, string, array, "
-            "or data structure. For character fields it returns the number "
-            "of characters. For arrays it returns the number of elements. "
-            "For data structures it returns the total length in bytes."
-        )
-    },
-    {
-        "question": "What is the capital of Australia?",
-        "must_contain": [
-            "Canberra"
-        ],
+        "question": "What is the translation boundary principle?",
+        "must_contain": ["translation boundary", "integration layer", "application layer"],
         "must_not_contain": [],
-        "ideal_answer": "The capital of Australia is Canberra."
+        "ideal_answer": (
+            "The translation boundary separates the integration layer from "
+            "the application layer. JSON parsing belongs in the application "
+            "layer not the integration layer. The integration layer stays "
+            "payload-agnostic by passing the raw JSON string unchanged."
+            )
+        },
+    {
+        "question": "How does YAJL parse JSON on IBMi?",
+        "must_contain": ["YAJL", "tree-node", "sanitise"],
+        "must_not_contain": [],
+        "ideal_answer": (
+        "In IBMi event-driven integration using the Infoview connector pattern, "
+        "YAJL parsing follows six steps: sanitise the JSON string first to replace "
+        "invalid IBMi characters, convert to tree-node structure using YAJL services, "
+        "navigate to key nodes using relative paths, iterate child nodes using DoWhile "
+        "loops with GetFirstChild and GetNextChild until null, handle simple vs complex "
+        "attributes using If-ElseIf logic, and handle arrays with nested DoWhile loops. "
+        "All values received via the connector arrive as character strings requiring "
+        "explicit type conversion."
+        )
+    },
+    {
+        "question": "What are the common mistakes in IBMi event integration?",
+        "must_contain": ["security", "configuration", "null", "scaling"],
+        "must_not_contain": [],
+        "ideal_answer": (
+        "Based on a production implementation using Infoview connectors "
+        "between IBMi and Kafka, five documented mistakes are: "
+        "1. Underestimating security and user profile authority setup for RPC calls. "
+        "2. Silent success masking missing configuration — components work individually "
+        "but end-to-end flow fails. "
+        "3. Assuming null handling agreement stays agreed without schema validation. "
+        "4. Connector parameter extraction more complex than initial prototype suggested. "
+        "5. Scaling not considered early enough — constraints surface as integrations grow."
+        )
     }
 ]

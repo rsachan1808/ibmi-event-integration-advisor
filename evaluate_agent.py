@@ -4,7 +4,7 @@ from anthropic import Anthropic
 from test_cases import TEST_CASES
 
 # Import your working agent
-from langgraph_agent import ask_agent
+from integration_advisor_agent import ask_agent
 
 # Load API keys from config module
 from config import load_keys
@@ -144,7 +144,15 @@ def run_evaluation():
 
         if llm_result.get("issues"):
             print(f"  Issues:             {llm_result['issues']}")
-
+        
+        # Flag questions with specialist terminology where LLM judge
+        # may be unreliable — keyword check is more trustworthy here
+        specialist_terms = ["infoview", "yajl", "connector", "rpc", 
+                           "data queue", "ibmi", "rpg"]
+        if any(term in question.lower() for term in specialist_terms):
+            print(f"  ⚠️  Specialist terminology detected — LLM judge score "
+                  f"may be unreliable. Keyword check is primary signal.")
+            
         results.append({
             "question":   question,
             "answer":     answer,
