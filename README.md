@@ -1,120 +1,128 @@
-# IBMi LangGraph Agent — Structured state machine with RAG
+# IBMi Event Integration Advisor
 
-## What it does
-Extends the IBMi RAG agent with explicit flow control using LangGraph.
-The previous agent left all routing decisions to the LLM with a raw
-while loop. This agent uses a state machine where every transition is
-named, visible, and independently controllable — giving the engineer
-control over what happens at each step rather than leaving it entirely
-to the LLM.
+An AI agent that guides IBMi developers through integrating legacy 
+IBMi applications with modern event-driven architectures using 
+Kafka and Confluent.
 
-## Why a state machine over a while loop
+---
 
-A while loop works but it is opaque. When something goes wrong you
-cannot see which step failed or why. A state machine makes every
-transition explicit — each node does one job, each edge is a named
-decision, and every step prints what is happening.
+## What it solves
 
-The practical difference in debugging: when the router was broken in
-development, the while loop would have returned a wrong answer silently
-with no indication of the problem. The state machine printed
-`[ROUTER] No tool needed → finish` when it should have printed
-`[ROUTER] Tool requested → execute_tool` — revealing the exact
-failure point immediately without guesswork.
+Companies modernising their IBMi application stacks have few 
+practical guides for one of the most effective modernisation 
+approaches available — event-driven architecture. Most organisations 
+are adopting event-driven patterns to decouple application components, 
+but documentation for connecting IBMi systems to Kafka is sparse, 
+generic, and does not reflect the realities of production IBMi 
+environments.
 
-This visibility is not just useful during development. In a production
-IBMi environment where the agent is answering queries from developers
-across the organisation, knowing exactly which node failed and why is
-the difference between a 5-minute fix and a 2-hour investigation.
+This advisor fills that gap. It provides guidance at each step of 
+moving IBMi applications toward event-driven integration — from 
+architecture decisions through to implementation patterns — based 
+on knowledge from a real production implementation.
+
+No other tool combines IBMi/RPG expertise, Confluent/Kafka 
+integration patterns, and AI-assisted guidance in one place.
+
+---
+
+## Who this is for
+
+IBMi developers and architects who are:
+- Looking to connect existing IBMi applications to a Kafka-based 
+  event-driven architecture
+- Familiar with IBMi pub-sub concepts, JSON parsing in RPG, and 
+  the role of Kafka connectors
+- Trying to make design decisions that production experience shows 
+  are harder than they initially appear
+
+---
+
+## The question no Google search answers well
+
+Two decisions trip up almost every IBMi + Kafka integration team 
+that encounters them for the first time:
+
+**Where should JSON parsing happen?** The instinct is to parse at 
+the entry point and pass structured data downstream. The production 
+lesson is the opposite — parse as close to where the data is needed 
+as possible. The entry point should stay payload-agnostic. This 
+advisor explains why and documents the pattern that works in 
+production.
+
+**Which message format to use?** Kafka supports multiple formats — 
+JSON, Avro, Protobuf. JSON is the most accessible for IBMi teams 
+but requires explicit handling for every type conversion. Avro and 
+Protobuf offer schema enforcement and efficiency benefits but add 
+complexity on the IBMi parsing side. This advisor documents the 
+JSON approach as implemented in production and notes the tradeoffs 
+against other formats.
+
+---
 
 ## Architecture
-
-[START]
+User question
 ↓
-[call_llm] ←─────────────────────┐
-↓                              │
-[router] ──→ tool_use  → [execute_tool]
+LangGraph agent — reasons about which tool to call
 ↓
-├──→ end_turn    → [finish]       → [END]
-└──→ step_limit  → [handle_error] → [END]
+├── search_integration_patterns
+│   Retrieves architecture guidance, design principles,
+│   JSON parsing steps, type conversion reference
+│
+└── search_lessons_learned
+Retrieves documented mistakes and lessons from
+a real production implementation
+Hybrid RAG pipeline (BM25 + semantic embeddings)
+↓
+Claude synthesises answer from retrieved documentation
 
-### The four nodes
+### Why two specialised tools instead of one
 
-**call_llm** — sends the current conversation state to Claude with
-available tool definitions. Serialises all response blocks to
-dictionaries so they survive being stored in state across iterations.
+A single general-purpose retrieval tool forces the agent to make 
+good query decisions consistently — and LLMs are not always 
+consistent. Two tools with explicit descriptions make routing 
+deterministic. Architecture questions reliably hit 
+`search_integration_patterns`. Mistakes and lessons questions 
+reliably hit `search_lessons_learned`. This eliminates a category 
+of silent failures where the agent answers from general knowledge 
+instead of the documentation.
 
-**execute_tool** — handles ALL tool calls in a single response, not
-just the first one. When Claude requests two function lookups in
-parallel (e.g. comparing %DATE and %PARMS), this node executes both
-and returns a matching tool_result for each. The Anthropic API requires
-every tool_use block to have a corresponding tool_result — missing even
-one causes a 400 error.
+---
 
-**finish** — extracts the final text answer from state and returns it.
-Handles three content formats defensively: plain string, list of dicts
-with a text block, and unexpected types — because Claude's response
-format varies depending on whether tools were used.
+## Knowledge base
 
-**handle_error** — catches two failure conditions: step limit exceeded
-and unhandled exceptions. Returns a structured error message rather
-than crashing so the calling application can handle it gracefully.
+### Currently documented — IBMi program design (Chapter 3)
+3.1 The translation boundary principle
+Why JSON parsing belongs in application programs not the entry point
+3.2 Entry point program structure
+Standalone program design, routing table pattern, logging program
+as decision point, step-by-step flow from RPC call to data queue
+3.3 JSON parsing on IBMi using YAJL
+Six-step parsing process, tree-node navigation, DoWhile loop pattern,
+simple vs complex attribute handling, array processing
+3.4 Type conversion reference
+JSON type to RPG type mapping with conversion notes and gotchas
+for each type including null handling
+3.5 Common mistakes and lessons learned
+Five documented mistakes from a production implementation:
+security setup, silent failures, null handling, connector
+complexity, and scaling
 
-### The router
+### Planned chapters
+Chapter 1 — Integration architecture options
+Infoview connector pattern, REST from RPG,
+journal-based CDC, IBM MQ bridge, when to use which
+Chapter 2 — Error handling
+Payload-as-data pattern, schema registry for contracts,
+IBMi retry for recoverable failures
+Chapter 4 — Observability and latency
+Per-hop instrumentation, round trip threshold alerting,
+IBMi-side latency factors
+Chapter 5 — Decision framework
+When to use which pattern, format selection (JSON vs
+Avro vs Protobuf), common tradeoffs
 
-The router is the decision point after every call_llm execution.
-It makes three possible decisions:
-
-- **tool_use** — Claude's response contains one or more tool_use
-  blocks. Control passes to execute_tool. After execution, the graph
-  loops back to call_llm with the tool results appended to state.
-
-- **end_turn** — Claude's response contains only text. The agent has
-  enough information to answer. Control passes to finish.
-
-- **step_limit** — the agent has made 10 or more tool calls without
-  reaching end_turn. Control passes to handle_error. Without this
-  guard, a poorly worded question or ambiguous tool description could
-  cause the agent to loop indefinitely — consuming API credits and
-  blocking other processes in a production environment.
-
-### State
-
-Every node reads from and writes back to a shared state dictionary:
-
-```python
-class AgentState(TypedDict):
-    question:     str   # original question, never changes
-    messages:     list  # full conversation history, grows each step
-    tool_result:  str   # result from most recent tool call
-    final_answer: str   # populated by finish node
-    error:        str   # populated by handle_error node
-    steps:        int   # counts tool calls, checked by router
-```
-
-State is the memory of the graph. Because Claude has no memory between
-API calls, the messages list is manually extended at each node —
-appending Claude's tool requests and your tool results so Claude can
-follow the reasoning thread across multiple steps.
-
-## Key debugging lessons from building this
-
-**Silent failures are the hardest bugs.** The most surprising problem
-in development was a broken router that produced no error — it simply
-routed to finish when it should have routed to execute_tool, returning
-a wrong answer with no exception raised. The node trace logs revealed
-it immediately. Without those logs the bug would have been invisible.
-
-**Parallel tool calls require parallel results.** When Claude requests
-two tools in a single response, you must return a tool_result for every
-tool_use block before making the next API call. Returning only one
-result causes a 400 error. The fix is iterating over all tool_use
-blocks rather than stopping at the first.
-
-**Serialise early.** Anthropic SDK returns typed objects (ToolUseBlock,
-TextBlock) not plain dicts. LangGraph stores state between nodes and
-these objects do not survive the round trip reliably. Convert everything
-to plain dicts immediately in call_llm before storing in state.
+---
 
 ## How to run it
 
@@ -122,88 +130,76 @@ to plain dicts immediately in call_llm before storing in state.
 ```bash
 pip install langchain langchain-community langchain-anthropic
 pip install langchain-voyageai chromadb rank_bm25 anthropic
-pip install langgraph python-dotenv
+pip install langgraph fastapi uvicorn python-dotenv
 ```
 
 **Create a .env file:**
 ANTHROPIC_API_KEY=your-anthropic-key
 VOYAGE_API_KEY=your-voyageai-key
 
-**Add your IBMi documentation:**
-Place your IBMi reference file as `ibmi_docs.txt` in the same folder.
-
-**Run:**
+**Run the agent directly:**
 ```bash
-python langgraph_agent.py
+python integration_advisor_agent.py
 ```
 
-## Example traces
+**Run as HTTP API:**
+```bash
+uvicorn api:app --reload --port 8000
+```
 
-**Single function lookup:**
-[NODE: call_llm] Step 1 — Serialised 1 blocks: ['tool_use']
-[ROUTER] Tool requested → execute_tool
-[NODE: execute_tool] Found 1 tool call(s)
-[NODE: call_llm] Step 2 — Serialised 1 blocks: ['text']
-[ROUTER] No tool needed → finish
-Answer: %DATE returns the current system date...
+Then open http://localhost:8000/docs for the interactive API 
+documentation.
 
-**Parallel function comparison:**
-[NODE: call_llm] Step 1 — Serialised 3 blocks: ['text', 'tool_use', 'tool_use']
-[ROUTER] Tool requested → execute_tool
-[NODE: execute_tool] Found 2 tool call(s)
-[NODE: call_llm] Step 2 — Serialised 1 blocks: ['text']
-[ROUTER] No tool needed → finish
-Answer: %DATE handles date operations, %PARMS counts parameters...
+**Run as Docker container:**
+```bash
+docker build -t ibmi-integration-advisor .
+docker run -p 8000:8000 --env-file .env ibmi-integration-advisor
+```
 
-**General knowledge — no tool needed:**
-[NODE: call_llm] Step 1 — Serialised 1 blocks: ['text']
-[ROUTER] No tool needed → finish
-Answer: The capital of Australia is Canberra...
+---
 
-## Error handling
+## Example questions
+"What is the translation boundary principle and why does it matter?"
+"How does JSON parsing work on IBMi using YAJL?"
+"What are the common mistakes when building an IBMi Kafka integration?"
+"Why should JSON parsing happen in application programs rather
+than the entry point?"
+"What type conversion is needed when mapping JSON numbers to RPG
+packed decimal fields?"
 
-| Where            | Type          | Action                         |
-|------------------|---------------|--------------------------------|
-| Missing API keys | Configuration | Stop — SystemExit before setup |
-| RAG setup failure | Infrastructure | Stop — SystemExit with message |
-| Anthropic API down | Infrastructure | Stop — route to handle_error |
-| max_tokens hit | Logic | Stop — route to handle_error |
-| Step limit reached | Logic | Stop — route to handle_error |
-| VoyageAI timeout | Recoverable | Log — return message to Claude |
-| Empty RAG result | Data quality | Log — return not found to Claude |
-| Unknown tool | Logic | Log — return message to Claude |
+---
 
 ## Evaluation
 
-The agent includes an automated evaluation framework that runs 
-after any change to measure answer quality.
+The agent includes an automated evaluation framework with two 
+evaluation methods per test case:
 
-Two evaluation methods per test case:
-- **Keyword check** — verifies required terms are present and 
-  no hallucinated terms appear. Fast, free, catches missing 
-  function names.
-- **LLM judge** — Claude evaluates correctness and completeness 
-  against an ideal answer. Catches subtle factual errors that 
-  keyword matching misses.
+- **Keyword check** — verifies required terms are present
+- **LLM judge** — evaluates correctness and completeness
 
-Both must pass for a test to be considered passing.
+Note: The LLM judge may score lower for answers containing 
+specialist IBMi terminology (Infoview, YAJL, data queues) that 
+is not in general training data. Keyword check is the primary 
+signal for specialist content questions.
 
-**Run evaluation:**
+**Current evaluation results: 3/3 passing at 100%**
+
 ```bash
 python evaluate_agent.py
 ```
 
-**First run results: 3/4 tests passing**
-- %DATE ✅ — correct and complete
-- %PARMS ✅ — correct and complete  
-- %LEN ❌ — missing array and data structure coverage
-- Australia capital ✅ — correct
+---
 
-The %LEN failure identified a genuine documentation gap —
-the source documentation does not cover array and data 
-structure usage which are primary IBMi use cases.
+## Legal note
+
+This knowledge base documents transferable patterns and principles 
+from production experience. No proprietary employer details, 
+specific configuration values, program names, or client information 
+are included. All content is written at the pattern level and is 
+safe for public sharing.
 
 ---
+
 Built with: Anthropic Claude · LangGraph · LangChain · ChromaDB ·
-VoyageAI Embeddings · BM25 · Python
-State machine: 4 nodes · 1 conditional router · step limit guard
+VoyageAI Embeddings · BM25 · FastAPI · Docker
+Knowledge base: Chapter 3 complete — Chapters 1, 2, 4, 5 in progress
