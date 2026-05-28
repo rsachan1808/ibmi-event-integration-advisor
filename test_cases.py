@@ -39,5 +39,28 @@ TEST_CASES = [
         "4. Connector parameter extraction more complex than initial prototype suggested. "
         "5. Scaling not considered early enough — constraints surface as integrations grow."
         )
+    },
+    {
+        "question": "What are the integration patterns for connecting IBMi to modern applications?",
+        "must_contain": ["Infoview", "REST", "CDC", "MQ"],
+        "must_not_contain": [],
+        "ideal_answer": (
+            "Four integration patterns exist for IBMi modernisation: "
+            "Confluent Kafka with Infoview connectors for event-driven decoupled integration, "
+            "REST API from RPG for synchronous request-response, "
+            "Journal-based CDC for non-invasive data replication, "
+            "and IBM MQ bridge for existing MQ environments."
+        )
+    },
+    {
+        "question": "When should I use journal-based CDC instead of the Infoview connector pattern?",
+        "must_contain": ["CDC", "journal", "non-invasive", "data"],
+        "must_not_contain": [],
+        "ideal_answer": (
+            "Use journal-based CDC when cloud applications need IBMi data for analytics "
+            "or AI training without triggering business logic, and when no IBMi code changes "
+            "are permitted. The Infoview connector pattern is better when bi-directional "
+            "event-driven integration with business logic invocation is needed."
+        )
     }
 ]

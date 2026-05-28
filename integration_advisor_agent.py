@@ -397,5 +397,5 @@ def ask_agent(question: str) -> str:
     return result["final_answer"]
 
 # Test
-answer = ask_agent("How does JSON parsing work on IBMi using YAJL?")
+answer = ask_agent("What are the integration patterns available for connecting IBMi to modern applications?")
 print(f"\nFinal answer: {answer}")

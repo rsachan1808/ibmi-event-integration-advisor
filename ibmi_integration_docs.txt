@@ -1,3 +1,383 @@
+# Chapter 1 — Integration Architecture Options
+
+## Architecture scope — cloud and infrastructure agnostic
+Although the implementation documented here uses GCP as the 
+modern application platform, the integration pattern is 
+independent of where those applications are hosted. The 
+Confluent/Kafka layer acts as the abstraction boundary between 
+IBMi and the modern application stack.
+
+The same pattern applies whether the consuming applications 
+run on:
+- Google Cloud Platform (GCP)
+- Amazon Web Services (AWS)
+- Microsoft Azure
+- On-premise Kubernetes or containerised infrastructure
+- Any platform that can produce and consume Kafka events
+
+The IBMi side of the integration — entry point program design, 
+JSON parsing, data queue response pattern — is identical 
+regardless of what sits on the other side of Confluent.
+
+The Infoview connector product suite has been used to integrate 
+IBMi with SAP, Salesforce, external databases, and any system 
+that connects to Kafka — not only cloud platforms.
+----
+
+## Overview
+
+The following patterns cover the main approaches for connecting 
+IBMi systems to modern application stacks. Each suits a different 
+set of requirements, constraints, and team capabilities.
+
+The five sections in this chapter are:
+1. Confluent Kafka with Infoview connectors — event-driven, decoupled
+2. REST API from RPG — synchronous, request-response
+3. Journal-based CDC — passive data replication, non-invasive
+4. IBM MQ bridge — asynchronous guaranteed messaging
+5. When to use which — decision framework
+
+Note on scope: this chapter documents patterns at the conceptual 
+and design level. The Infoview connector pattern is documented 
+in detail from production experience in Chapter 3. The other 
+patterns are documented at the architectural level to support 
+informed pattern selection.
+
+## Overview
+
+The four integration patterns covered in this chapter are:
+1. Confluent Kafka with Infoview connectors — event-driven, 
+   decoupled, bi-directional
+2. REST API from RPG — synchronous, request-response, 
+   on-demand business logic
+3. Journal-based CDC — passive data replication, non-invasive, 
+   near real-time
+4. IBM MQ bridge — asynchronous guaranteed messaging, 
+   existing MQ environments
+
+Each pattern is described with what it is, when to choose it, 
+and constraints to be aware of. Section 1.5 provides a 
+decision framework for choosing between them.
+
+---
+
+## 1.1 Confluent Kafka with Infoview Connectors
+
+### What it is
+
+Confluent Kafka provides an event streaming platform where 
+applications produce and consume messages via topics. Connecting 
+IBMi to Confluent requires a connector that understands the IBMi 
+environment. Infoview's infoConnect for Kafka is the specialist 
+connector product for IBMi + Kafka integration, providing three 
+connectors:
+
+- **Data Queue Source Connector** — reads from IBMi data queues 
+  and publishes to Kafka topics
+- **Data Queue Sink Connector** — reads from Kafka topics and 
+  writes to IBMi data queues with exactly-once delivery guarantees
+- **Program Call Sink Connector** — reads from Kafka topics and 
+  directly invokes IBMi programs via RPC, returning output to 
+  another Kafka topic
+
+The connectors work within Kafka Connect via low-level 
+socket-based connections facilitated by the IBM Toolbox library. 
+Both JSON and Avro message formats are supported.
+
+The complete architecture using the Program Call Sink Connector 
+is documented from production experience in Chapter 3.
+
+### When to choose this pattern
+
+Choose Confluent Kafka with Infoview connectors when:
+
+- Applications need to be decoupled — producers and consumers 
+  operate independently without waiting for each other
+- Multiple consumers need to receive the same event — Kafka 
+  topics allow many independent consumers
+- Data retention after consumption is required — unlike MQ, 
+  Kafka retains messages for a configurable period enabling 
+  replay and audit
+- Parallel processing is needed — IBMi can produce while 
+  multiple cloud applications consume simultaneously
+- The organisation is adopting Kafka as its event streaming 
+  backbone and IBMi needs to participate as a first-class citizen
+- Bi-directional integration is needed — events flow both 
+  from cloud to IBMi and from IBMi to cloud
+
+### Constraints to be aware of
+
+- Infoview connector licencing and configuration adds 
+  infrastructure overhead compared to simpler patterns
+- Connector configuration is more complex than initial 
+  prototypes suggest — see Chapter 3, Mistake 4
+- Requires IBMi user profile authority configuration for 
+  RPC invocation — see Chapter 3, Mistake 1
+- Operational responsibility for connector instances, 
+  Kafka Connect cluster, and Schema Registry
+
+---
+
+## 1.2 REST API from RPG
+
+### What it is
+
+RPG programs can be exposed as HTTP endpoints, allowing 
+external applications to call IBMi business logic synchronously 
+via REST APIs. There are two approaches:
+
+**Direct exposure via IBM Integrated Web Services (IWS)**
+IBM i includes a built-in Integrated Web Services server that 
+wraps RPG service programs as RESTful HTTP endpoints without 
+requiring external middleware. IWS handles JSON parsing and 
+provides a management GUI for deploying and monitoring services. 
+IBM i can both serve REST APIs as a provider and consume 
+external REST APIs as a client using IWS client libraries. 
+IWS 3.0 was released in October 2025, updated to a Jakarta EE 
+based architecture.
+
+**Via middleware layer**
+A common enterprise pattern places a Java or other middleware 
+layer between the external caller and the RPG programs. The 
+front-end calls the middleware REST endpoint. The middleware 
+translates the request and invokes the RPG program. The RPG 
+program returns its response as a JSON string which the 
+middleware formats and returns to the caller. This pattern 
+provides additional abstraction and allows the RPG interface 
+to evolve independently of the external API contract.
+
+In both approaches, the RPG program handles JSON payload 
+processing internally using the same YAJL tree-node parsing 
+pattern documented in Chapter 3, section 3.3.
+
+### When to choose this pattern
+
+Choose REST API from RPG when:
+
+- A synchronous response is required — the calling application 
+  needs an immediate answer before continuing
+- A front-end or cloud application needs to trigger IBMi 
+  business logic on demand
+- The integration is request-response — one caller, one 
+  response, no fan-out to multiple consumers
+- The calling application already speaks HTTP/REST and adding 
+  a Kafka layer would add unnecessary complexity
+- Exposing existing IBMi business logic to web or mobile 
+  applications without rewriting it
+
+### Constraints to be aware of
+
+- Synchronous by nature — the caller waits for the IBMi 
+  program to complete
+- Scaling requires managing HTTP connection pools and IBMi 
+  job capacity simultaneously
+- Tight coupling between the API contract and the RPG 
+  program interface
+
+---
+
+## 1.3 Journal-Based CDC
+
+### What it is
+
+IBMi journals are transaction recorders. Every operation on 
+a journalled DB2 for i database file — inserts, updates, 
+deletes — is recorded as a journal entry. This creates a 
+complete, ordered audit trail of all data changes.
+
+Change Data Capture (CDC) uses this journal to synchronise 
+data to another system without modifying any IBMi application 
+code. Infoview's infoCDC product connects directly into DB2 
+journals and streams changes to Kafka topics or other 
+messaging platforms.
+
+**Step 1 — Baseline snapshot:** An initial snapshot of the 
+IBMi data is extracted and loaded to the destination. Both 
+sides start from the same baseline.
+
+**Step 2 — Delta capture:** As transactions occur on IBMi, 
+journal entries record the changes. infoCDC monitors the 
+journal and converts change events into Kafka messages.
+
+**Step 3 — Continuous synchronisation:** Change events 
+flow to the destination system in near real time. The IBMi 
+application has no knowledge that synchronisation is occurring.
+
+infoCDC has been measured at approximately 2,500 transactions 
+per second for single table updates including end-to-end 
+processing through Kafka Connect to the target topic.
+
+### When to choose this pattern
+
+Choose journal-based CDC when:
+
+- GCP or cloud applications need IBMi data for analytics, 
+  reporting, or AI model training without triggering IBMi 
+  business logic
+- The integration must be non-invasive — existing RPG programs 
+  cannot be modified and integration must happen below the 
+  application layer
+- Near real-time data replication is needed without full 
+  synchronous coupling
+- Building a data pipeline where IBMi is the system of record 
+  and downstream systems need to stay in sync
+- The use case is read access, analytics, or data warehousing 
+  rather than transaction processing
+
+### Constraints to be aware of
+
+- Journals must be enabled on relevant IBMi files — not all 
+  files are journalled by default and enabling journalling 
+  has storage and performance implications
+- Schema changes on the IBMi side require CDC pipeline updates — 
+  column additions or type changes can break replication
+- CDC captures data changes not business events — downstream 
+  systems receive raw data mutations rather than meaningful 
+  business transactions
+- Requires infoCDC or equivalent tooling installation and 
+  configuration on the IBMi side
+
+---
+
+## 1.4 IBM MQ Bridge to Kafka
+
+### What it is
+
+IBM MQ is messaging middleware with a native IBM i 
+implementation that provides asynchronous communication 
+between platforms. IBM MQ on IBM i supports MQ version 9.x 
+features, enabling IBM i to participate in enterprise messaging 
+architectures with guaranteed delivery across cloud or 
+on-premise systems.
+
+Key MQ characteristics relevant to IBMi integration:
+
+- **Guaranteed delivery** — messages are not lost even if 
+  the consuming application is temporarily unavailable
+- **FIFO ordering** — messages processed in the order received
+- **Point-to-point** — one producer, one consumer per queue 
+  by default
+- **Consumed once** — when a consumer reads a message it is 
+  removed from the queue (unlike Kafka where messages are retained)
+- **One-way per queue** — a separate reply queue is needed 
+  for request-response patterns
+
+Where IBM MQ is already deployed, an MQ-to-Kafka bridge 
+connects the two platforms. The IBMi side interacts with MQ 
+using familiar MQ APIs. The bridge reads from MQ queues and 
+publishes to Kafka topics, or reads Kafka topics and writes 
+to MQ queues.
+
+### When to choose this pattern
+
+Choose IBM MQ bridge to Kafka when:
+
+- IBM MQ is already deployed and the team has MQ expertise — 
+  extending existing infrastructure rather than introducing 
+  an entirely new platform
+- Guaranteed delivery is the primary requirement — MQ's 
+  delivery guarantees are simpler to configure than Kafka's 
+  exactly-once semantics
+- Gradual migration from MQ to Kafka — the bridge allows 
+  IBMi to remain on MQ while other systems adopt Kafka
+- One-way data flow to a downstream system is sufficient 
+  and real-time retention is not needed
+
+### Constraints to be aware of
+
+- MQ does not retain messages after consumption — messages 
+  consumed by the bridge are gone
+- Adding a bridge introduces another component to operate 
+  and monitor
+- Less suited when multiple independent consumers need the 
+  same event — Kafka's topic model handles this naturally 
+  where MQ requires multiple queues
+- Not the right choice for new greenfield Kafka implementations 
+  where MQ is not already present
+
+---
+
+## 1.5 When to Use Which — Decision Framework
+
+The decision framework covers:
+1. Scenario mapping table — requirements to recommended pattern
+2. Four decision questions — narrowing options systematically
+3. Message format selection — JSON vs Avro vs Protobuf
+
+### Scenario mapping table — requirements to recommended pattern 
+Requirement                                Recommended pattern
+─────────────────────────────────────────  ──────────────────────────────────
+Cloud apps need IBMi data for analytics    Journal-based CDC (infoCDC)
+No IBMi code changes permitted             Journal-based CDC (infoCDC)
+AI/ML training data from IBMi              Journal-based CDC (infoCDC)
+Synchronous response required              REST API from RPG (IWS or middleware)
+Front-end triggers IBMi business logic     REST API from RPG
+On-demand request-response pattern         REST API from RPG
+Decouple producers and consumers           Confluent Kafka + Infoview
+Multiple consumers for same event          Confluent Kafka + Infoview
+Data retention after consumption needed    Confluent Kafka + Infoview
+Bi-directional IBMi + cloud integration    Confluent Kafka + Infoview
+IBM MQ already deployed, team knows MQ     IBM MQ bridge
+Gradual migration from MQ to Kafka         IBM MQ bridge
+Guaranteed delivery, simple config needed  IBM MQ bridge
+
+### Four decision questions — narrowing options systematically
+
+**1. Is synchronous response required?**
+Yes → REST API from RPG
+No → continue
+
+**2. Is the requirement data replication or business logic?**
+Data replication → Journal-based CDC
+Business logic → continue
+
+**3. Is IBM MQ already deployed in the environment?**
+Yes with team expertise → IBM MQ bridge is viable
+No → Confluent Kafka with Infoview connectors
+
+**4. Do multiple consumers need the same event independently?**
+Yes → Confluent Kafka with Infoview connectors
+No → either MQ bridge or Kafka depending on infrastructure
+
+### Message format selection — JSON vs Avro vs Protobuf
+
+When using Confluent Kafka, message format is a separate 
+decision from connector selection. Infoview connectors 
+support both JSON and Avro.
+
+**JSON** — most accessible for IBMi teams. Parsing uses 
+the YAJL tree-node approach documented in Chapter 3. 
+Human-readable and easy to debug during development. 
+Higher message size than binary formats.
+
+**Avro** — schema-enforced binary format integrated with 
+Confluent Schema Registry. More efficient for high-volume 
+scenarios. Requires Avro deserialisation on the IBMi 
+parsing side — more complex than JSON.
+
+**Protobuf** — Google's binary serialisation format. 
+Similar benefits to Avro with different tooling. Less 
+common in IBMi environments currently.
+
+For IBMi teams new to Kafka integration, JSON with 
+Confluent Schema Registry validation is the recommended 
+starting point. It leverages existing IBMi JSON parsing 
+knowledge while adding the schema contract enforcement 
+that prevents the null handling issues documented in 
+Chapter 3, Mistake 3.
+
+---
+
+## Chapter 1 summary
+Pattern                    Direction    Sync    IBMi change    Primary use case
+─────────────────────────  ───────────  ──────  ─────────────  ─────────────────────
+Infoview + Kafka           Both         Async   Optional       Event-driven decoupling
+REST from RPG (IWS)        Inbound      Sync    Required       On-demand business logic
+Journal-based CDC          Outbound     Async   None           Data replication / AI
+IBM MQ bridge              Both         Async   Minimal        Existing MQ environments
+
+# Chapter 3 — IBMi Program Design
+
 ## 3.1 The Translation Boundary Principle
 
 ### What it is
@@ -225,18 +605,6 @@ section 3.5 Mistake 1 for the lesson learned about validating
 this setup early.
 
 ## 3.3 JSON Parsing on IBMi Using YAJL
-
-### Six-step parsing process overview
-
-The YAJL parsing process on IBMi follows six steps in sequence:
-1. Sanitise the incoming JSON string — replace invalid IBMi characters with blanks
-2. Convert JSON string to tree-node structure using YAJL services
-3. Navigate to key nodes using relative path from the root
-4. Iterate child nodes using DoWhile loop with GetFirstChild and GetNextChild
-5. Handle simple vs complex attributes using If-ElseIf logic
-6. Handle arrays and nested objects using nested DoWhile loops
-
-Each step is described in detail below.
 
 ### Library and environment
 
@@ -497,21 +865,16 @@ Always validate null before converting.
 | Nested object | —                   | Handled with nested loops. Outer loop iterates over each object in the main array. Inner loop iterates over the attributes within each object. Extracted attributes are then converted and stored using the type rules above.         |
 | Array         | Data structure      | Define an equivalent data structure on IBMi for the array. Iterate over the JSON array extracting each element and storing into the corresponding RPG data structure fields.                                                         |
 
+## 3.5 Common Mistakes and Lessons Learned
 
-## 3.5 DOCUMENTED COMMON MISTAKES (5 mistakes total)
-
-The five documented mistakes from this production implementation are:
-1. Underestimating security and connectivity setup
-2. Silent success masking missing configuration  
-3. Assuming null handling is agreed once and stays agreed
-4. Connector parameter extraction more complex than initially prototyped
-5. Scaling not considered early enough in the design
-
-Each mistake is described in detail below.
+This section documents mistakes encountered during a real production 
+implementation. The list is not exhaustive — it reflects patterns 
+observed during development, UAT, and post-deployment. It grows 
+as more integration scenarios are encountered.
 
 ---
 
-### Documented Mistake 1 — Underestimating the security and connectivity setup
+### Mistake 1 — Underestimating the security and connectivity setup
 
 **What happened:**
 The IBMi entry point program is invoked via RPC by the Infoview 
@@ -538,7 +901,7 @@ diagnose than application errors.
 
 ---
 
-### Documented Mistake 2 — Silent success masking missing configuration
+### Mistake 2 — Silent success masking missing configuration
 
 **What happened:**
 After deployment, no failures were appearing in monitoring. The 
@@ -565,7 +928,7 @@ validated together, not independently.
 
 ---
 
-### Documented Mistake 3 — Assuming null handling is agreed once and stays agreed
+### Mistake 3 — Assuming null handling is agreed once and stays agreed
 
 **What happened:**
 An early agreement was reached with the publishing application 
@@ -593,7 +956,7 @@ technically.
 
 ---
 
-### Documented Mistake 4 — Connector parameter extraction more complex than initially prototyped
+### Mistake 4 — Connector parameter extraction more complex than prototyped
 
 **What happened:**
 A proof of concept demonstrated that extracting parameter values 
@@ -617,7 +980,7 @@ unexpected complexity most often surfaces.
 
 ---
 
-### Documented Mistake 5 — Scaling not considered early enough in the design
+### Mistake 5 — Scaling not considered early enough in the design
 
 **What happened:**
 The initial integration design was validated for a single system 
