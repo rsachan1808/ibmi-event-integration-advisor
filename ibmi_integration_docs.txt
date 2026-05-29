@@ -376,6 +376,277 @@ REST from RPG (IWS)        Inbound      Sync    Required       On-demand busines
 Journal-based CDC          Outbound     Async   None           Data replication / AI
 IBM MQ bridge              Both         Async   Minimal        Existing MQ environments
 
+
+# Chapter 2 — Error Handling
+
+## Overview
+
+The five error handling patterns covered in this chapter are:
+1. Payload-as-data pattern — encoding errors inside JSON response
+   rather than using infrastructure error queues
+2. IBMi retry mechanism — 5-minute intervals up to 1-hour maximum
+   for transient system conditions like policy locks
+3. Schema registry for contract enforcement — preventing structural
+   errors at the Confluent layer before they reach IBMi
+4. Application error path — how errors travel from IBMi program
+   chain back to GCP consuming application
+5. Connector selection — managed vs self-managed implications
+   for operational complexity
+
+---
+
+## 2.1 The Payload-as-Data Pattern
+
+### What it is
+
+Application errors — validation failures, business rule violations, 
+missing required fields, processing errors — are encoded inside the 
+JSON response payload rather than handled at the Confluent or 
+connector infrastructure layer.
+
+The response JSON structure includes a dedicated error section 
+alongside the standard response attributes. Whether the IBMi 
+processing succeeded or failed, a response is always written to 
+the data queue. The Infoview source connector picks it up and 
+publishes it to the outbound Kafka topic. The consuming GCP 
+application receives the response and reads the error section 
+to determine what happened.
+
+### Why this was the right decision
+
+The integration layer — Confluent topics and Infoview connectors 
+— is shared infrastructure that serves multiple applications. 
+Keeping it payload-agnostic means it does not need to understand 
+the business meaning of any message.
+
+The alternative — using Kafka error topics or dead letter queues 
+for application errors — would require additional listener 
+applications to process those error topics. This means:
+
+- Additional infrastructure components to build and operate
+- Additional cost for the listener services
+- Business error handling logic scattered across infrastructure 
+  components rather than owned by the applications that 
+  understand the business context
+
+The payload-as-data pattern keeps business error handling where 
+business knowledge lives — in the GCP applications that created 
+the original request and understand what to do when it fails.
+
+### The error path
+IBMi program encounters application error
+↓
+Error details encoded in response JSON error section
+↓
+Response written to IBMi data queue
+↓
+Infoview source connector picks up response
+↓
+Published to outbound Confluent topic
+↓
+GCP application consumes response
+↓
+GCP application reads error section
+↓
+Manual task created for consultant or operator to action
+
+### Key principle
+
+The Confluent and Infoview connector layers treat all messages 
+identically — they do not parse the JSON payload and do not 
+distinguish between success and error responses. This is 
+intentional. The integration layer has one responsibility: 
+move messages reliably between IBMi and the Kafka topic. 
+Error interpretation is the consuming application's 
+responsibility.
+
+---
+
+## 2.2 IBMi Retry Mechanism
+
+### What it is
+
+Not all errors warrant a response back to the GCP application 
+immediately. For certain transient IBMi conditions, the 
+application retries internally before producing a final response.
+
+### The policy lock retry pattern
+
+The specific retry pattern implemented covers policy lock 
+scenarios — situations where an IBMi policy record is locked 
+by another process and cannot be updated immediately.
+
+IBMi encounters policy lock
+↓
+Wait 5 minutes
+↓
+Retry the operation
+↓
+Repeat for up to 1 hour total
+↓
+If lock clears → complete processing → send success response
+If lock persists after 1 hour → send failure response to GCP
+↓
+GCP application creates manual task for operator action
+
+### Why this pattern was chosen
+
+Policy locks are a transient condition — another process 
+temporarily holds the lock and will release it. Immediately 
+sending a failure response to GCP for every lock would 
+generate unnecessary manual tasks for operators when the 
+situation would resolve on its own in most cases.
+
+The 1-hour maximum retry window provides a reasonable balance:
+- Short enough that genuine stuck locks are surfaced promptly
+- Long enough to accommodate normal processing variations
+
+### What is not retried
+
+Validation failures and business rule errors are not retried 
+because retrying would produce the same result — the input 
+data is the problem, not a transient system condition. These 
+errors go directly into the response payload error section 
+for the GCP application to handle.
+
+The distinction is:
+Transient system condition (policy lock)  → retry on IBMi side
+Input data or business rule failure       → immediate error
+response to GCP
+
+---
+
+## 2.3 Schema Registry for Contract Enforcement
+
+### What it is
+
+Confluent Schema Registry enforces the agreed JSON payload 
+structure between producers and consumers. Any message that 
+does not conform to the registered schema is rejected at the 
+Confluent layer before it reaches the IBMi connector — 
+preventing downstream parsing failures caused by unexpected 
+payload structures.
+
+### What schema validation failure looks like
+
+Conceptually, when a producer publishes a message with a 
+structure that violates the registered schema — missing a 
+required attribute, wrong data type, unexpected field — 
+Confluent Schema Registry rejects the message at the topic 
+level. The message is not delivered to consumers. The producer 
+receives a rejection and is responsible for fixing the payload 
+before republishing.
+
+This converts an informal agreement ("we agreed nulls would 
+be omitted") into an enforced technical contract. Changes 
+to the payload structure require a schema update — making 
+breaking changes visible and controlled rather than silent.
+
+### Implementation note
+
+Schema registry was not used in the first phase of this 
+implementation due to technical challenges during initial 
+deployment. The null handling agreement documented in Chapter 3, 
+Mistake 3 was a consequence of this — relying on convention 
+rather than enforcement. Schema registry is the recommended 
+approach for subsequent phases and new integrations.
+
+### Why it matters for IBMi specifically
+
+IBMi JSON parsing using YAJL does not perform automatic schema 
+validation. If an unexpected null arrives in a field the 
+parsing code assumes is populated, the result is a runtime 
+abend or silent data corruption — both harder to diagnose 
+than a clean schema rejection at the Confluent layer.
+
+Enabling schema registry early eliminates an entire category 
+of IBMi-side parsing failures before they reach the RPG code.
+
+---
+
+## 2.4 Connector Selection and Its Implications
+
+### The self-managed vs managed connector decision
+
+Two types of connectors are available in Confluent environments:
+
+**Self-managed connectors** — deployed and operated by the 
+integration team. Provide full customisation freedom. Require 
+the team to handle deployment, scaling, monitoring, and 
+upgrades.
+
+**Confluent managed connectors** — operated by Confluent as 
+a service. Less customisation flexibility but significantly 
+reduced operational overhead.
+
+In this implementation, the initial decision was to use 
+self-managed connectors for customisation flexibility. 
+Technical challenges during implementation led to switching 
+to Confluent managed connectors for the first phase of 
+deployment.
+
+### The lesson
+
+The customisation flexibility of self-managed connectors is 
+only valuable if the team has the capacity and expertise to 
+operate them reliably. For teams new to Kafka Connect 
+operations, managed connectors reduce the operational surface 
+area significantly — particularly during initial deployment 
+when other integration components are also being configured 
+and tested simultaneously.
+
+Customisation requirements that cannot be met by managed 
+connectors are a valid reason to invest in self-managed 
+operations. Defaulting to self-managed for customisation 
+freedom that is not yet needed adds operational complexity 
+without corresponding benefit.
+
+### Recommendation
+
+Start with managed connectors. Move to self-managed only 
+when specific customisation requirements cannot be met by 
+the managed option. This is consistent with the broader 
+pattern of preferring simplicity in the integration layer 
+and keeping complexity in the application layer where it 
+can be controlled.
+
+---
+
+## 2.5 Error Handling Summary
+The error handling responsibility is divided across four layers:
+1. Confluent layer — schema registry handles structural violations
+2. IBMi layer — retry mechanism handles transient system conditions
+3. Application layer — payload error section handles business errors
+4. GCP consuming application — manual task creation handles 
+   operator-actionable failures
+   
+Error type                    Where handled      Mechanism
+────────────────────────────  ─────────────────  ──────────────────────────
+Schema violation              Confluent layer    Schema registry rejection
+Policy lock (transient)       IBMi side          5-min retry up to 1 hour
+Validation / business error   Application layer  Error section in response JSON
+Infrastructure failure        Connector layer    Connector retry and alerting
+Null handling violation       Confluent layer    Schema registry (when enabled)
+
+### The core principle
+
+Each layer handles the errors it owns:
+
+- **Confluent layer** owns structural contract enforcement 
+  via schema registry
+- **IBMi layer** owns transient system condition handling 
+  via retry
+- **Application layer** owns business error communication 
+  via payload error section
+- **GCP consuming application** owns business error response 
+  via manual task creation
+
+Mixing these responsibilities — for example using infrastructure 
+dead letter queues for business errors — increases complexity, 
+adds operational overhead, and moves business logic into the 
+wrong layer.
+
+
 # Chapter 3 — IBMi Program Design
 
 ## 3.1 The Translation Boundary Principle

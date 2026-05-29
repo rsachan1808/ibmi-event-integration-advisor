@@ -39,6 +39,8 @@ splitter = RecursiveCharacterTextSplitter(
 )
 chunks = splitter.split_documents(documents)
 
+print(f"Loaded {len(chunks)} chunks") 
+
 embeddings  = VoyageAIEmbeddings(
     voyage_api_key=VOYAGE_KEY,
     model="voyage-3"
@@ -397,5 +399,5 @@ def ask_agent(question: str) -> str:
     return result["final_answer"]
 
 # Test
-answer = ask_agent("What are the integration patterns available for connecting IBMi to modern applications?")
+answer = ask_agent("What is the difference between managed and self-managed Kafka connectors?")
 print(f"\nFinal answer: {answer}")

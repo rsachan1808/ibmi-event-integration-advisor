@@ -62,5 +62,32 @@ TEST_CASES = [
             "are permitted. The Infoview connector pattern is better when bi-directional "
             "event-driven integration with business logic invocation is needed."
         )
+    },
+    {
+        "question": "How are application errors handled in IBMi Kafka integration?",
+        "must_contain": ["payload", "error", "JSON", "consumer"],
+        "must_not_contain": [],
+        "ideal_answer": (
+            "Application errors are encoded inside the JSON response payload "
+            "using the payload-as-data pattern. A dedicated error section in "
+            "the response JSON carries validation failures and business rule "
+            "errors back to the GCP consuming application. The integration "
+            "layer remains payload-agnostic. For transient conditions like "
+            "policy locks, IBMi retries every 5 minutes for up to 1 hour "
+            "before sending a failure response."
+        )
+    },
+    {
+        "question": "What is the policy lock retry pattern on IBMi?",
+        "must_contain": ["policy", "retry", "5", "hour"],
+        "must_not_contain": [],
+        "ideal_answer": (
+            "When an IBMi policy record is locked by another process, the "
+            "integration retries every 5 minutes for up to 1 hour. If the "
+            "lock clears the processing completes successfully. If it persists "
+            "after 1 hour a failure response is sent to the GCP application "
+            "which creates a manual task for operator action. Validation "
+            "failures are not retried as they would produce the same result."
+        )
     }
 ]
